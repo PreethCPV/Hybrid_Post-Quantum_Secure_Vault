@@ -1,0 +1,169 @@
+{
+  "benchmark_info": {
+    "document": "smart_contract_agreement.pdf",
+    "document_size_bytes": 543528,
+    "iterations": 3000,
+    "warmup_iterations_discarded": 10,
+    "timestamp": "2026-03-01T18:02:33.560596",
+    "note": "Each iteration uses independently generated keypairs to prevent key caching artifacts."
+  },
+  "results": [
+    {
+      "approach": "Classical",
+      "algorithm": "ECDSA-SECP256R1",
+      "public_key_bytes": 178,
+      "private_key_bytes": 241,
+      "signature_bytes": 71,
+      "keygen": {
+        "mean_ms": 0.03770707867139814,
+        "std_ms": 0.021101916295412155,
+        "median_ms": 0.033718500162649434,
+        "min_ms": 0.030690000130562112,
+        "max_ms": 0.6327999999484746
+      },
+      "sign": {
+        "mean_ms": 0.27564991267839406,
+        "std_ms": 0.04452071649759748,
+        "median_ms": 0.26379549944977043,
+        "min_ms": 0.2502229999663541,
+        "max_ms": 1.178978000098141
+      },
+      "verify": {
+        "mean_ms": 0.3082178489936875,
+        "std_ms": 0.03902152477235365,
+        "median_ms": 0.29686649941140786,
+        "min_ms": 0.2811739996104734,
+        "max_ms": 0.8521180006937357
+      },
+      "total_mean_ms": 0.6215748403434798,
+      "quantum_safe": false,
+      "iterations": 3000
+    },
+    {
+      "approach": "Quantum-Safe (Lattice)",
+      "algorithm": "ML-DSA-65",
+      "public_key_bytes": 1952,
+      "private_key_bytes": 4032,
+      "signature_bytes": 3309,
+      "keygen": {
+        "mean_ms": 0.034467861657806985,
+        "std_ms": 0.011903055307297683,
+        "median_ms": 0.032156999623111915,
+        "min_ms": 0.030490999051835388,
+        "max_ms": 0.18086899945046753
+      },
+      "sign": {
+        "mean_ms": 1.1536930703223334,
+        "std_ms": 0.13177622719523693,
+        "median_ms": 1.1269795004409389,
+        "min_ms": 1.0346670005674241,
+        "max_ms": 5.71079700057453
+      },
+      "verify": {
+        "mean_ms": 1.081863937681798,
+        "std_ms": 0.08668142980569433,
+        "median_ms": 1.0581560009086388,
+        "min_ms": 1.007789998766384,
+        "max_ms": 2.8150050002295757
+      },
+      "total_mean_ms": 2.2700248696619383,
+      "quantum_safe": true,
+      "iterations": 3000
+    },
+    {
+      "approach": "Quantum-Safe (NTRU)",
+      "algorithm": "Falcon-512",
+      "public_key_bytes": 897,
+      "private_key_bytes": 1281,
+      "signature_bytes": 651,
+      "keygen": {
+        "mean_ms": 4.388615384667598,
+        "std_ms": 1.1040806204632003,
+        "median_ms": 4.054552999150474,
+        "min_ms": 3.148625999529031,
+        "max_ms": 12.297453000428504
+      },
+      "sign": {
+        "mean_ms": 1.2273480609843925,
+        "std_ms": 0.089210972435837,
+        "median_ms": 1.195032999930845,
+        "min_ms": 1.1382229986338643,
+        "max_ms": 2.8419039990694728
+      },
+      "verify": {
+        "mean_ms": 1.0871210336808872,
+        "std_ms": 0.07878273308955863,
+        "median_ms": 1.059845500094525,
+        "min_ms": 1.0057079998659901,
+        "max_ms": 1.84184399950027
+      },
+      "total_mean_ms": 6.703084479332878,
+      "quantum_safe": true,
+      "iterations": 3000
+    },
+    {
+      "approach": "Quantum-Safe (Hash)",
+      "algorithm": "SPHINCS+-SHA2-128f-simple",
+      "public_key_bytes": 32,
+      "private_key_bytes": 64,
+      "signature_bytes": 17088,
+      "keygen": {
+        "mean_ms": 0.2309041720291134,
+        "std_ms": 0.04656728987921949,
+        "median_ms": 0.22302449997368967,
+        "min_ms": 0.21483199998328928,
+        "max_ms": 1.603550001163967
+      },
+      "sign": {
+        "mean_ms": 5.921430071321083,
+        "std_ms": 0.23591541092599916,
+        "median_ms": 5.8695234993138,
+        "min_ms": 5.561633999604965,
+        "max_ms": 7.955651999509428
+      },
+      "verify": {
+        "mean_ms": 0.6858944296533688,
+        "std_ms": 0.06640169380534765,
+        "median_ms": 0.6666384997515706,
+        "min_ms": 0.6196979993546847,
+        "max_ms": 1.6430150008091005
+      },
+      "total_mean_ms": 6.838228673003566,
+      "quantum_safe": true,
+      "iterations": 3000
+    },
+    {
+      "approach": "Proposed Hybrid Vault",
+      "algorithm": "PBKDF2 + ECDH + ML-KEM-768 + AES-256-GCM + ECDSA + ML-DSA-65",
+      "kem_ciphertext_bytes": 1088,
+      "wrapped_key_bytes": 32,
+      "ecdsa_sig_bytes": 71,
+      "mldsa_sig_bytes": 3309,
+      "total_overhead_bytes": 4500,
+      "keygen": {
+        "mean_ms": 17.505580075356193,
+        "std_ms": 0.6332512268199979,
+        "median_ms": 17.39190900025278,
+        "min_ms": 16.541753999263165,
+        "max_ms": 32.24594499988598
+      },
+      "protect": {
+        "mean_ms": 6.7442357593408815,
+        "std_ms": 1.3937873549893198,
+        "median_ms": 6.529708000016399,
+        "min_ms": 3.7811959991813637,
+        "max_ms": 10.435498999868287
+      },
+      "recovery": {
+        "mean_ms": 2.2118478620268434,
+        "std_ms": 0.1527333175080179,
+        "median_ms": 2.172388500184752,
+        "min_ms": 2.024863000769983,
+        "max_ms": 3.6397020012373105
+      },
+      "total_mean_ms": 26.461663696723917,
+      "quantum_safe": true,
+      "iterations": 3000
+    }
+  ]
+}
