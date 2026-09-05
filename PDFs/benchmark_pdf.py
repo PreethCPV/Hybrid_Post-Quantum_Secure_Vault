@@ -11,12 +11,49 @@ import time
 import json
 import csv
 import base64
+import ctypes
+import math
 import statistics
 from datetime import datetime
 from typing import Dict, List, Optional
 
 
 WARMUP_ITERATIONS = 10
+
+
+def _zeroize(data: bytes) -> None:
+    """
+    Change 2 (Memory Key Erasure): best-effort in-place zeroization of a
+    Python bytes/bytearray object's backing buffer using ctypes.memset.
+
+    IMPORTANT CAVEATS (state these honestly in the manuscript, do not
+    oversell this as a formal security guarantee):
+      - Plain `bytes` objects are immutable in CPython. This function reaches
+        past that immutability by computing the address of the object's
+        inline data buffer (`id(data) + bytes.__basicsize__ - 1`) and
+        overwriting it directly. This is a CPython implementation detail,
+        not part of the Python language spec, and will not work on other
+        interpreters (e.g. PyPy).
+      - It cannot reach copies the interpreter or OS may already have made
+        (e.g. during string interning, bytecode constant folding, garbage
+        collection, or paging to swap).
+      - This is a defense-in-depth measure appropriate for a research
+        prototype/benchmark harness. A production system would use a
+        proper secure-memory primitive (e.g. mlock + explicit_bzero in a
+        native/C extension, or HSM/TPM-backed key storage) — which is
+        exactly the gap already acknowledged in the trust-assumptions
+        section (no TPM/HSM integration).
+    """
+    if not isinstance(data, (bytes, bytearray)):
+        return
+    size = len(data)
+    if size == 0:
+        return
+    if isinstance(data, bytearray):
+        ctypes.memset((ctypes.c_char * size).from_buffer(data), 0, size)
+    else:
+        address = id(data) + bytes.__basicsize__ - 1
+        ctypes.memset(address, 0, size)
 
 
 class CryptoBenchmark:
@@ -60,12 +97,18 @@ class CryptoBenchmark:
         return json.dumps(message_data, sort_keys=True).encode("utf-8")
 
     def _summarize(self, times: List[float]) -> Dict:
+        n = len(times)
+        std = statistics.stdev(times) if n > 1 else 0.0
         return {
             "mean_ms": statistics.mean(times),
-            "std_ms": statistics.stdev(times) if len(times) > 1 else 0.0,
+            "std_ms": std,
             "median_ms": statistics.median(times),
             "min_ms": min(times),
             "max_ms": max(times),
+            "n": n,
+            # 95% CI margin of error: 1.96 * SD / sqrt(n) (normal approximation,
+            # valid here since n is always large e.g. 3000 per the manuscript).
+            "ci95_ms": (1.96 * std / math.sqrt(n)) if n > 1 else 0.0,
         }
 
     def benchmark_ecdsa(self, iterations: int) -> Dict:
@@ -137,9 +180,9 @@ class CryptoBenchmark:
             "iterations": iterations,
         }
 
-        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | Median: {keygen_stats['median_ms']:.4f} ms")
-        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | Median: {sign_stats['median_ms']:.4f} ms")
-        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | Median: {verify_stats['median_ms']:.4f} ms")
+        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | 95% CI: ± {keygen_stats['ci95_ms']:.4f} ms")
+        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | 95% CI: ± {sign_stats['ci95_ms']:.4f} ms")
+        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | 95% CI: ± {verify_stats['ci95_ms']:.4f} ms")
 
         return result
 
@@ -202,9 +245,9 @@ class CryptoBenchmark:
             "iterations": iterations,
         }
 
-        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | Median: {keygen_stats['median_ms']:.4f} ms")
-        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | Median: {sign_stats['median_ms']:.4f} ms")
-        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | Median: {verify_stats['median_ms']:.4f} ms")
+        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | 95% CI: ± {keygen_stats['ci95_ms']:.4f} ms")
+        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | 95% CI: ± {sign_stats['ci95_ms']:.4f} ms")
+        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | 95% CI: ± {verify_stats['ci95_ms']:.4f} ms")
 
         return result
 
@@ -273,9 +316,9 @@ class CryptoBenchmark:
             "iterations": iterations,
         }
 
-        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | Median: {keygen_stats['median_ms']:.4f} ms")
-        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | Median: {sign_stats['median_ms']:.4f} ms")
-        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | Median: {verify_stats['median_ms']:.4f} ms")
+        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | 95% CI: ± {keygen_stats['ci95_ms']:.4f} ms")
+        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | 95% CI: ± {sign_stats['ci95_ms']:.4f} ms")
+        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | 95% CI: ± {verify_stats['ci95_ms']:.4f} ms")
 
         return result
 
@@ -344,9 +387,9 @@ class CryptoBenchmark:
             "iterations": iterations,
         }
 
-        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | Median: {keygen_stats['median_ms']:.4f} ms")
-        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | Median: {sign_stats['median_ms']:.4f} ms")
-        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | Median: {verify_stats['median_ms']:.4f} ms")
+        print(f"  KeyGen  — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | 95% CI: ± {keygen_stats['ci95_ms']:.4f} ms")
+        print(f"  Sign    — Mean: {sign_stats['mean_ms']:.4f} ms | SD: {sign_stats['std_ms']:.4f} ms | 95% CI: ± {sign_stats['ci95_ms']:.4f} ms")
+        print(f"  Verify  — Mean: {verify_stats['mean_ms']:.4f} ms | SD: {verify_stats['std_ms']:.4f} ms | 95% CI: ± {verify_stats['ci95_ms']:.4f} ms")
 
         return result
 
@@ -367,46 +410,84 @@ class CryptoBenchmark:
                 iterations=pbkdf2_iterations,
                 backend=default_backend(),
             )
-            kdf.derive(b"warmuppassword")
+            master_key_wu = kdf.derive(b"warmuppassword")
             ecdh_priv = ec.generate_private_key(ec.SECP256R1(), default_backend())
             ecdh_pub = ecdh_priv.public_key()
+            ecdh_priv_bytes_wu = ecdh_priv.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
             kem_obj = oqs.KeyEncapsulation(kem_algorithm)
             kem_pub = kem_obj.generate_keypair()
+            kem_sk_wu = kem_obj.export_secret_key()
             ecdsa_priv = ec.generate_private_key(ec.SECP256R1(), default_backend())
+            ecdsa_priv_bytes_wu = ecdsa_priv.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
             dil_obj = oqs.Signature(sig_algorithm)
             dil_pub = dil_obj.generate_keypair()
+            dil_sk_wu = dil_obj.export_secret_key()
+
+            # Algorithm 1, step 9: Vault <- AES-256-GCM.Encrypt(K_Master, KeysPlain)
+            keystore_plain_wu = json.dumps({
+                "ecdsa_sk": base64.b64encode(ecdsa_priv_bytes_wu).decode(),
+                "dil_sk": base64.b64encode(dil_sk_wu).decode(),
+                "ecdh_sk": base64.b64encode(ecdh_priv_bytes_wu).decode(),
+                "kem_sk": base64.b64encode(kem_sk_wu).decode(),
+            }, sort_keys=True).encode()
+            keystore_iv_wu = os.urandom(12)
+            keystore_cipher_wu = Cipher(algorithms.AES(master_key_wu), modes.GCM(keystore_iv_wu), backend=default_backend())
+            keystore_enc_wu = keystore_cipher_wu.encryptor()
+            keystore_enc_wu.update(keystore_plain_wu) + keystore_enc_wu.finalize()
+
             aes_key = os.urandom(32)
             iv = os.urandom(12)
             cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv), backend=default_backend())
             enc = cipher.encryptor()
             ct = enc.update(message) + enc.finalize()
-            tag = enc.tag
             kem_ct, kem_shared = kem_obj.encap_secret(kem_pub)
             ecdh_shared = ecdh_priv.exchange(ec.ECDH(), ecdh_pub)
-            ecdh_derived = HKDF(
-                algorithm=hashes.SHA256(), length=32, salt=None,
-                info=b"hybrid-kem", backend=default_backend()
-            ).derive(ecdh_shared)
+            # Algorithm 2, line 6: KEK <- HKDF-SHA256(ss_PQ || ss_Class) — single combiner call
             kek = HKDF(
                 algorithm=hashes.SHA256(), length=32, salt=None,
                 info=b"key-encryption-key", backend=default_backend()
-            ).derive(kem_shared + ecdh_derived)
+            ).derive(kem_shared + ecdh_shared)
             wrap_iv = os.urandom(12)
             wc = Cipher(algorithms.AES(kek), modes.GCM(wrap_iv), backend=default_backend())
             we = wc.encryptor()
-            wrapped = we.update(aes_key) + we.finalize()
-            wrap_tag = we.tag
+            we.update(aes_key) + we.finalize()
             sig_payload = json.dumps(
-                {"ct": base64.b64encode(ct).decode(), "ts": datetime.now().isoformat()},
+                {
+                    "ciphertext": base64.b64encode(ct).decode(),
+                    "kem_ciphertext": base64.b64encode(kem_ct).decode(),
+                    "wrapped_key": base64.b64encode(aes_key).decode(),
+                    "timestamp": datetime.now().isoformat(),
+                },
                 sort_keys=True
             ).encode()
             ecdsa_priv.sign(sig_payload, ec.ECDSA(hashes.SHA256()))
             dil_obj.sign(sig_payload)
 
+        # ---- Change 1: one perf_counter() list per DIRECTLY measured sub-operation ----
         keygen_times = []
-        keygen_records = []
+
+        encrypt_times = []      # Protection: Symmetric Payload Encryption (AES-256-GCM)
+        kem_encap_times = []    # Protection: Hybrid KEM Encapsulation (ML-KEM + ECDH + HKDF)
+        keywrap_times = []      # Protection: Key Wrapping (AES-256-GCM Key Wrapper)
+        sign_times = []         # Protection: Dual Signing (ECDSA + ML-DSA-65)
+
+        verify_times = []       # Recovery: Dual Signature Verification (ECDSA + ML-DSA-65)
+        kem_decap_times = []    # Recovery: Hybrid KEM Decapsulation & Key Unwrapping
+        decrypt_times = []      # Recovery: Symmetric Payload Decryption (AES-256-GCM)
+
+        verification_failures = 0
+        sample = None  # kept only for byte-size reporting (Table 8)
 
         for _ in range(iterations):
+            # ================= Initialization / KeyGen (Algorithm 1) =================
             start = time.perf_counter()
 
             salt = os.urandom(16)
@@ -421,6 +502,11 @@ class CryptoBenchmark:
 
             ecdh_priv = ec.generate_private_key(ec.SECP256R1(), default_backend())
             ecdh_pub = ecdh_priv.public_key()
+            ecdh_priv_bytes = ecdh_priv.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
 
             kem_obj = oqs.KeyEncapsulation(kem_algorithm)
             kem_pub = kem_obj.generate_keypair()
@@ -428,138 +514,189 @@ class CryptoBenchmark:
 
             ecdsa_priv = ec.generate_private_key(ec.SECP256R1(), default_backend())
             ecdsa_pub = ecdsa_priv.public_key()
+            ecdsa_priv_bytes = ecdsa_priv.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
 
             dil_obj = oqs.Signature(sig_algorithm)
             dil_pub = dil_obj.generate_keypair()
             dil_sk = dil_obj.export_secret_key()
 
+            # Algorithm 1, step 9: Vault <- AES-256-GCM.Encrypt(K_Master, KeysPlain)
+            # This is the step that was previously missing: master_key was derived
+            # but never actually used to protect the keystore.
+            keystore_plain = json.dumps({
+                "ecdsa_sk": base64.b64encode(ecdsa_priv_bytes).decode(),
+                "dil_sk": base64.b64encode(dil_sk).decode(),
+                "ecdh_sk": base64.b64encode(ecdh_priv_bytes).decode(),
+                "kem_sk": base64.b64encode(kem_sk).decode(),
+            }, sort_keys=True).encode()
+            keystore_iv = os.urandom(12)
+            keystore_cipher = Cipher(algorithms.AES(master_key), modes.GCM(keystore_iv), backend=default_backend())
+            keystore_encryptor = keystore_cipher.encryptor()
+            keystore_vault = keystore_encryptor.update(keystore_plain) + keystore_encryptor.finalize()
+            keystore_tag = keystore_encryptor.tag
+
             keygen_times.append((time.perf_counter() - start) * 1000)
-            keygen_records.append({
-                "master_key": master_key,
-                "ecdh_priv": ecdh_priv,
-                "ecdh_pub": ecdh_pub,
-                "kem_pub": kem_pub,
-                "kem_sk": kem_sk,
-                "ecdsa_priv": ecdsa_priv,
-                "ecdsa_pub": ecdsa_pub,
-                "dil_pub": dil_pub,
-                "dil_sk": dil_sk,
-            })
 
-        protect_times = []
-        protect_records = []
+            # Objects bound to this iteration's secret keys. Construction is kept
+            # OUTSIDE every timed region below — only the cryptographic operation
+            # itself is measured (direct instrumentation, per Reviewer #2).
+            kem_enc = oqs.KeyEncapsulation(kem_algorithm, kem_sk)
+            dil_signer = oqs.Signature(sig_algorithm, dil_sk)
 
-        for rec in keygen_records:
-            kem_enc = oqs.KeyEncapsulation(kem_algorithm, rec["kem_sk"])
-            dil_signer = oqs.Signature(sig_algorithm, rec["dil_sk"])
+            # ================= PROTECTION PHASE (Algorithm 2) =================
 
-            start = time.perf_counter()
-
+            # -- 1. Symmetric Payload Encryption (AES-256-GCM) --
             aes_key = os.urandom(32)
             iv = os.urandom(12)
+            start = time.perf_counter()
             cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv), backend=default_backend())
             encryptor = cipher.encryptor()
             ciphertext = encryptor.update(message) + encryptor.finalize()
             tag = encryptor.tag
+            encrypt_times.append((time.perf_counter() - start) * 1000)
 
-            kem_ct, kem_shared = kem_enc.encap_secret(rec["kem_pub"])
-
-            ecdh_shared = rec["ecdh_priv"].exchange(ec.ECDH(), rec["ecdh_pub"])
-            ecdh_derived = HKDF(
-                algorithm=hashes.SHA256(), length=32, salt=None,
-                info=b"hybrid-kem", backend=default_backend()
-            ).derive(ecdh_shared)
-
+            # -- 2. Hybrid KEM Encapsulation (ML-KEM + ECDH + HKDF) --
+            start = time.perf_counter()
+            kem_ct, kem_shared = kem_enc.encap_secret(kem_pub)          # ss_PQ, ct_PQ
+            ecdh_shared = ecdh_priv.exchange(ec.ECDH(), ecdh_pub)       # ss_Class
+            # Algorithm 2, line 6: KEK <- HKDF-SHA256(ss_PQ || ss_Class) — single combiner call
             kek = HKDF(
                 algorithm=hashes.SHA256(), length=32, salt=None,
                 info=b"key-encryption-key", backend=default_backend()
-            ).derive(kem_shared + ecdh_derived)
+            ).derive(kem_shared + ecdh_shared)
+            kem_encap_times.append((time.perf_counter() - start) * 1000)
 
+            # -- 3. Key Wrapping (AES-256-GCM Key Wrapper) --
             wrap_iv = os.urandom(12)
+            start = time.perf_counter()
             wrap_cipher = Cipher(algorithms.AES(kek), modes.GCM(wrap_iv), backend=default_backend())
             wrap_enc = wrap_cipher.encryptor()
             wrapped_key = wrap_enc.update(aes_key) + wrap_enc.finalize()
             wrap_tag = wrap_enc.tag
+            keywrap_times.append((time.perf_counter() - start) * 1000)
 
+            # -- 4. Dual Signing (ECDSA + ML-DSA-65) --
+            # Dual-Signature Binding (Section 4.3.2, step 3 / Algorithm 2, line 9):
+            # payload now covers C_Doc, ct_PQ, and Key_Wrapped together, not just the
+            # document ciphertext — so neither the KEM ciphertext nor the wrapped key
+            # can be swapped without invalidating both signatures.
             sig_payload = json.dumps(
                 {
                     "ciphertext": base64.b64encode(ciphertext).decode(),
+                    "kem_ciphertext": base64.b64encode(kem_ct).decode(),
+                    "wrapped_key": base64.b64encode(wrapped_key).decode(),
                     "timestamp": datetime.now().isoformat(),
                 },
                 sort_keys=True,
             ).encode()
 
-            ecdsa_sig = rec["ecdsa_priv"].sign(sig_payload, ec.ECDSA(hashes.SHA256()))
+            start = time.perf_counter()
+            ecdsa_sig = ecdsa_priv.sign(sig_payload, ec.ECDSA(hashes.SHA256()))
             dil_sig = dil_signer.sign(sig_payload)
+            sign_times.append((time.perf_counter() - start) * 1000)
 
-            protect_times.append((time.perf_counter() - start) * 1000)
-            protect_records.append({
-                "ciphertext": ciphertext,
-                "iv": iv,
-                "tag": tag,
-                "kem_ct": kem_ct,
-                "kem_sk": rec["kem_sk"],
-                "ecdh_priv": rec["ecdh_priv"],
-                "ecdh_pub": rec["ecdh_pub"],
-                "wrapped_key": wrapped_key,
-                "wrap_iv": wrap_iv,
-                "wrap_tag": wrap_tag,
-                "ecdsa_pub": rec["ecdsa_pub"],
-                "dil_pub": rec["dil_pub"],
-                "ecdsa_sig": ecdsa_sig,
-                "dil_sig": dil_sig,
-                "sig_payload": sig_payload,
-            })
-
-        recovery_times = []
-
-        for rec in protect_records:
-            kem_dec = oqs.KeyEncapsulation(kem_algorithm, rec["kem_sk"])
+            # ================= RECOVERY PHASE (Algorithm 3) =================
+            kem_dec = oqs.KeyEncapsulation(kem_algorithm, kem_sk)
             dil_verifier = oqs.Signature(sig_algorithm)
 
+            # -- 1. Dual Signature Verification (ECDSA + ML-DSA-65, strict AND) --
             start = time.perf_counter()
-
+            ecdsa_ok = True
             try:
-                rec["ecdsa_pub"].verify(rec["ecdsa_sig"], rec["sig_payload"], ec.ECDSA(hashes.SHA256()))
+                ecdsa_pub.verify(ecdsa_sig, sig_payload, ec.ECDSA(hashes.SHA256()))
             except Exception:
-                pass
+                ecdsa_ok = False
+            dil_ok = True
+            try:
+                dil_verifier.verify(sig_payload, dil_sig, dil_pub)
+            except Exception:
+                dil_ok = False
+            verify_times.append((time.perf_counter() - start) * 1000)
 
-            dil_verifier.verify(rec["sig_payload"], rec["dil_sig"], rec["dil_pub"])
+            # Algorithm 3, lines 6-7: if not (V1 and V2): Abort -- do not proceed
+            # to decapsulation/decryption on a failed hybrid verification.
+            if not (ecdsa_ok and dil_ok):
+                verification_failures += 1
+                # Keep sub-op lists aligned by iteration index: this iteration
+                # performed no decap/decrypt work, so record 0.0 rather than
+                # skipping the append (skipping would desynchronize
+                # kem_decap_times/decrypt_times from verify_times in the zip()
+                # below used to build recovery_times).
+                kem_decap_times.append(0.0)
+                decrypt_times.append(0.0)
+            else:
+                # -- 2. Hybrid KEM Decapsulation & Key Unwrapping --
+                start = time.perf_counter()
+                kem_shared_dec = kem_dec.decap_secret(kem_ct)
+                ecdh_shared_dec = ecdh_priv.exchange(ec.ECDH(), ecdh_pub)
+                kek_dec = HKDF(
+                    algorithm=hashes.SHA256(), length=32, salt=None,
+                    info=b"key-encryption-key", backend=default_backend()
+                ).derive(kem_shared_dec + ecdh_shared_dec)
+                unwrap_cipher = Cipher(
+                    algorithms.AES(kek_dec), modes.GCM(wrap_iv, wrap_tag),
+                    backend=default_backend()
+                )
+                unwrap_dec = unwrap_cipher.decryptor()
+                aes_key_dec = unwrap_dec.update(wrapped_key) + unwrap_dec.finalize()
+                kem_decap_times.append((time.perf_counter() - start) * 1000)
 
-            kem_shared_dec = kem_dec.decap_secret(rec["kem_ct"])
+                # -- 3. Symmetric Payload Decryption (AES-256-GCM) --
+                start = time.perf_counter()
+                dec_cipher = Cipher(
+                    algorithms.AES(aes_key_dec), modes.GCM(iv, tag),
+                    backend=default_backend()
+                )
+                decryptor = dec_cipher.decryptor()
+                decryptor.update(ciphertext) + decryptor.finalize()
+                decrypt_times.append((time.perf_counter() - start) * 1000)
 
-            ecdh_shared_dec = rec["ecdh_priv"].exchange(ec.ECDH(), rec["ecdh_pub"])
-            ecdh_derived_dec = HKDF(
-                algorithm=hashes.SHA256(), length=32, salt=None,
-                info=b"hybrid-kem", backend=default_backend()
-            ).derive(ecdh_shared_dec)
+            if sample is None:
+                sample = {
+                    "kem_ct": kem_ct,
+                    "wrapped_key": wrapped_key,
+                    "ecdsa_sig": ecdsa_sig,
+                    "dil_sig": dil_sig,
+                }
 
-            kek_dec = HKDF(
-                algorithm=hashes.SHA256(), length=32, salt=None,
-                info=b"key-encryption-key", backend=default_backend()
-            ).derive(kem_shared_dec + ecdh_derived_dec)
-
-            unwrap_cipher = Cipher(
-                algorithms.AES(kek_dec), modes.GCM(rec["wrap_iv"], rec["wrap_tag"]),
-                backend=default_backend()
-            )
-            unwrap_dec = unwrap_cipher.decryptor()
-            aes_key_dec = unwrap_dec.update(rec["wrapped_key"]) + unwrap_dec.finalize()
-
-            dec_cipher = Cipher(
-                algorithms.AES(aes_key_dec), modes.GCM(rec["iv"], rec["tag"]),
-                backend=default_backend()
-            )
-            decryptor = dec_cipher.decryptor()
-            decryptor.update(rec["ciphertext"]) + decryptor.finalize()
-
-            recovery_times.append((time.perf_counter() - start) * 1000)
+            # ================= Change 2: Memory Key Erasure =================
+            # Best-effort zeroization of this iteration's sensitive key material
+            # at the end of the iteration, once it is no longer needed.
+            _zeroize(kem_sk)
+            _zeroize(dil_sk)
+            _zeroize(master_key)
+            _zeroize(keystore_plain)
+            del kem_sk, dil_sk, master_key, keystore_plain
 
         keygen_stats = self._summarize(keygen_times)
+
+        encrypt_stats = self._summarize(encrypt_times)
+        kem_encap_stats = self._summarize(kem_encap_times)
+        keywrap_stats = self._summarize(keywrap_times)
+        sign_stats = self._summarize(sign_times)
+
+        verify_stats = self._summarize(verify_times)
+        kem_decap_stats = self._summarize(kem_decap_times)
+        decrypt_stats = self._summarize(decrypt_times)
+
+        # Protection / Recovery phase totals are the per-iteration SUM of the
+        # directly measured sub-operations above — NOT a separately wrapped
+        # outer timer, and NOT derived by subtraction. This is what Reviewer
+        # #2's comment on the cost breakdown is asking for.
+        protect_times = [
+            e + k + w + s
+            for e, k, w, s in zip(encrypt_times, kem_encap_times, keywrap_times, sign_times)
+        ]
+        recovery_times = [
+            v + kd + d
+            for v, kd, d in zip(verify_times, kem_decap_times, decrypt_times)
+        ]
         protect_stats = self._summarize(protect_times)
         recovery_stats = self._summarize(recovery_times)
-
-        sample = protect_records[0]
 
         result = {
             "approach": "Proposed Hybrid Vault",
@@ -578,11 +715,26 @@ class CryptoBenchmark:
             "total_mean_ms": keygen_stats["mean_ms"] + protect_stats["mean_ms"] + recovery_stats["mean_ms"],
             "quantum_safe": True,
             "iterations": iterations,
+            "verification_failures": verification_failures,
+            # Change 1: directly measured sub-operation breakdown (NEW Table 5b)
+            "protect_breakdown": {
+                "encrypt": encrypt_stats,
+                "kem_encap": kem_encap_stats,
+                "keywrap": keywrap_stats,
+                "sign": sign_stats,
+            },
+            "recovery_breakdown": {
+                "verify": verify_stats,
+                "kem_decap": kem_decap_stats,
+                "decrypt": decrypt_stats,
+            },
         }
 
-        print(f"  Initialization / KeyGen (PBKDF2 + Keys) — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | Median: {keygen_stats['median_ms']:.4f} ms")
-        print(f"  Protection Phase (Encrypt + KEM + Sign) — Mean: {protect_stats['mean_ms']:.4f} ms | SD: {protect_stats['std_ms']:.4f} ms | Median: {protect_stats['median_ms']:.4f} ms")
-        print(f"  Recovery Phase   (Verify + Decrypt)     — Mean: {recovery_stats['mean_ms']:.4f} ms | SD: {recovery_stats['std_ms']:.4f} ms | Median: {recovery_stats['median_ms']:.4f} ms")
+        print(f"  Initialization / KeyGen (PBKDF2 + Keys + Keystore Enc) — Mean: {keygen_stats['mean_ms']:.4f} ms | SD: {keygen_stats['std_ms']:.4f} ms | 95% CI: ± {keygen_stats['ci95_ms']:.4f} ms")
+        print(f"  Protection Phase (Encrypt + KEM + Wrap + Sign)         — Mean: {protect_stats['mean_ms']:.4f} ms | SD: {protect_stats['std_ms']:.4f} ms | 95% CI: ± {protect_stats['ci95_ms']:.4f} ms")
+        print(f"  Recovery Phase   (Verify + Decap + Decrypt)            — Mean: {recovery_stats['mean_ms']:.4f} ms | SD: {recovery_stats['std_ms']:.4f} ms | 95% CI: ± {recovery_stats['ci95_ms']:.4f} ms")
+        if verification_failures:
+            print(f"  WARNING: {verification_failures} / {iterations} iterations FAILED dual-signature verification.")
 
         return result
 
@@ -634,27 +786,27 @@ class CryptoBenchmark:
 
         print("\n\nTable 2: Standalone Key Generation Performance (milliseconds)")
         print("-" * 90)
-        print(f"{'Algorithm':<30} {'Mean':>10} {'SD':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
+        print(f"{'Algorithm':<30} {'Mean':>10} {'SD':>10} {'95% CI':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
         print("-" * 90)
         for r in standalone:
             kg = r["keygen"]
-            print(f"{r['algorithm']:<30} {kg['mean_ms']:>10.4f} {kg['std_ms']:>10.4f} {kg['median_ms']:>10.4f} {kg['min_ms']:>10.4f} {kg['max_ms']:>10.4f}")
+            print(f"{r['algorithm']:<30} {kg['mean_ms']:>10.4f} {kg['std_ms']:>10.4f} {kg['ci95_ms']:>10.4f} {kg['median_ms']:>10.4f} {kg['min_ms']:>10.4f} {kg['max_ms']:>10.4f}")
 
         print("\n\nTable 3: Standalone Signing Performance (milliseconds)")
         print("-" * 90)
-        print(f"{'Algorithm':<30} {'Mean':>10} {'SD':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
+        print(f"{'Algorithm':<30} {'Mean':>10} {'SD':>10} {'95% CI':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
         print("-" * 90)
         for r in standalone:
             sg = r["sign"]
-            print(f"{r['algorithm']:<30} {sg['mean_ms']:>10.4f} {sg['std_ms']:>10.4f} {sg['median_ms']:>10.4f} {sg['min_ms']:>10.4f} {sg['max_ms']:>10.4f}")
+            print(f"{r['algorithm']:<30} {sg['mean_ms']:>10.4f} {sg['std_ms']:>10.4f} {sg['ci95_ms']:>10.4f} {sg['median_ms']:>10.4f} {sg['min_ms']:>10.4f} {sg['max_ms']:>10.4f}")
 
         print("\n\nTable 4: Standalone Verification Performance (milliseconds)")
         print("-" * 90)
-        print(f"{'Algorithm':<30} {'Mean':>10} {'SD':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
+        print(f"{'Algorithm':<30} {'Mean':>10} {'SD':>10} {'95% CI':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
         print("-" * 90)
         for r in standalone:
             vr = r["verify"]
-            print(f"{r['algorithm']:<30} {vr['mean_ms']:>10.4f} {vr['std_ms']:>10.4f} {vr['median_ms']:>10.4f} {vr['min_ms']:>10.4f} {vr['max_ms']:>10.4f}")
+            print(f"{r['algorithm']:<30} {vr['mean_ms']:>10.4f} {vr['std_ms']:>10.4f} {vr['ci95_ms']:>10.4f} {vr['median_ms']:>10.4f} {vr['min_ms']:>10.4f} {vr['max_ms']:>10.4f}")
 
         print("\n\nTable 5: Standalone Total Operation Time — Mean(KeyGen + Sign + Verify) (milliseconds)")
         print("-" * 90)
@@ -678,17 +830,42 @@ class CryptoBenchmark:
             h = hybrid[0]
             print("\n\nTable 7: Proposed Hybrid Vault — Phase Performance (milliseconds)")
             print("-" * 90)
-            print(f"{'Phase':<45} {'Mean':>10} {'SD':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
+            print(f"{'Phase':<45} {'Mean':>10} {'SD':>10} {'95% CI':>10} {'Median':>10} {'Min':>10} {'Max':>10}")
             print("-" * 90)
             for label, key in [
-                ("Initialization / KeyGen (PBKDF2 + Keys)", "keygen"),
-                ("Protection Phase (Encrypt + KEM + Sign)", "protect"),
-                ("Recovery Phase (Verify + Decrypt)", "recovery"),
+                ("Initialization / KeyGen (PBKDF2 + Keys + Keystore Enc)", "keygen"),
+                ("Protection Phase (Encrypt + KEM + Wrap + Sign)", "protect"),
+                ("Recovery Phase (Verify + Decap + Decrypt)", "recovery"),
             ]:
                 s = h[key]
-                print(f"{label:<45} {s['mean_ms']:>10.4f} {s['std_ms']:>10.4f} {s['median_ms']:>10.4f} {s['min_ms']:>10.4f} {s['max_ms']:>10.4f}")
+                print(f"{label:<45} {s['mean_ms']:>10.4f} {s['std_ms']:>10.4f} {s['ci95_ms']:>10.4f} {s['median_ms']:>10.4f} {s['min_ms']:>10.4f} {s['max_ms']:>10.4f}")
 
             print(f"\n  Total End-to-End Mean: {h['total_mean_ms']:.4f} ms")
+            if h.get("verification_failures"):
+                print(f"  WARNING: {h['verification_failures']} / {h['iterations']} iterations failed dual-signature verification.")
+
+            print("\n\nNEW Table 5b: Directly Measured Micro-Benchmark Breakdown of Proposed Hybrid Vault")
+            print("(Per instructions: insert this directly below Table 5 in the manuscript)")
+            print("-" * 90)
+            print(f"{'Phase':<12} {'Sub-Operation Component':<48} {'Mean (ms)':>12} {'SD (ms)':>12}")
+            print("-" * 90)
+
+            pb = h["protect_breakdown"]
+            rb = h["recovery_breakdown"]
+
+            table_5b_rows = [
+                ("Protection", "Symmetric Payload Encryption (AES-256-GCM)", pb["encrypt"]),
+                ("Protection", "Hybrid KEM Encapsulation (ML-KEM + ECDH + HKDF)", pb["kem_encap"]),
+                ("Protection", "Key Wrapping (AES-256-GCM Key Wrapper)", pb["keywrap"]),
+                ("Protection", "Dual Signing (ECDSA + ML-DSA-65)", pb["sign"]),
+                ("Protection", "Total Protection Phase", h["protect"]),
+                ("Recovery", "Dual Signature Verification (ECDSA + ML-DSA-65)", rb["verify"]),
+                ("Recovery", "Hybrid KEM Decapsulation & Key Unwrapping", rb["kem_decap"]),
+                ("Recovery", "Symmetric Payload Decryption (AES-256-GCM)", rb["decrypt"]),
+                ("Recovery", "Total Recovery Phase", h["recovery"]),
+            ]
+            for phase, label, stats in table_5b_rows:
+                print(f"{phase:<12} {label:<48} {stats['mean_ms']:>12.4f} {stats['std_ms']:>12.4f}")
 
             print("\n\nTable 8: Proposed Hybrid Vault — Cryptographic Size Overhead")
             print("-" * 90)
@@ -712,22 +889,35 @@ class CryptoBenchmark:
         rows = []
         for r in self.results:
             if r["approach"] == "Proposed Hybrid Vault":
-                rows.append({
+                pb = r.get("protect_breakdown", {})
+                rb = r.get("recovery_breakdown", {})
+                row = {
                     "algorithm": r["algorithm"],
                     "approach": r["approach"],
                     "quantum_safe": r["quantum_safe"],
                     "keygen_mean_ms": r["keygen"]["mean_ms"],
                     "keygen_std_ms": r["keygen"]["std_ms"],
+                    "keygen_ci95_ms": r["keygen"]["ci95_ms"],
                     "keygen_median_ms": r["keygen"]["median_ms"],
                     "protect_mean_ms": r["protect"]["mean_ms"],
                     "protect_std_ms": r["protect"]["std_ms"],
+                    "protect_ci95_ms": r["protect"]["ci95_ms"],
                     "protect_median_ms": r["protect"]["median_ms"],
                     "recovery_mean_ms": r["recovery"]["mean_ms"],
                     "recovery_std_ms": r["recovery"]["std_ms"],
+                    "recovery_ci95_ms": r["recovery"]["ci95_ms"],
                     "recovery_median_ms": r["recovery"]["median_ms"],
                     "total_mean_ms": r["total_mean_ms"],
                     "iterations": r["iterations"],
-                })
+                    "verification_failures": r.get("verification_failures", 0),
+                }
+                # NEW Table 5b — directly measured sub-operation breakdown
+                for comp_name, comp_stats in {**pb, **rb}.items():
+                    row[f"{comp_name}_mean_ms"] = comp_stats["mean_ms"]
+                    row[f"{comp_name}_std_ms"] = comp_stats["std_ms"]
+                    row[f"{comp_name}_ci95_ms"] = comp_stats["ci95_ms"]
+                    row[f"{comp_name}_median_ms"] = comp_stats["median_ms"]
+                rows.append(row)
             else:
                 rows.append({
                     "algorithm": r["algorithm"],
@@ -738,12 +928,15 @@ class CryptoBenchmark:
                     "signature_bytes": r["signature_bytes"],
                     "keygen_mean_ms": r["keygen"]["mean_ms"],
                     "keygen_std_ms": r["keygen"]["std_ms"],
+                    "keygen_ci95_ms": r["keygen"]["ci95_ms"],
                     "keygen_median_ms": r["keygen"]["median_ms"],
                     "sign_mean_ms": r["sign"]["mean_ms"],
                     "sign_std_ms": r["sign"]["std_ms"],
+                    "sign_ci95_ms": r["sign"]["ci95_ms"],
                     "sign_median_ms": r["sign"]["median_ms"],
                     "verify_mean_ms": r["verify"]["mean_ms"],
                     "verify_std_ms": r["verify"]["std_ms"],
+                    "verify_ci95_ms": r["verify"]["ci95_ms"],
                     "verify_median_ms": r["verify"]["median_ms"],
                     "total_mean_ms": r["total_mean_ms"],
                     "iterations": r["iterations"],
