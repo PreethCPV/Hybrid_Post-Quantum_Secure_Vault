@@ -12,7 +12,7 @@ This framework provides both confidentiality and authenticity against "Harvest N
 * **Key Management (At-Rest):** PBKDF2-HMAC-SHA256 (100,000 iterations)
 * **Digital Signatures:** ML-DSA-65 (FIPS 204) + ECDSA (SECP256R1)
 
-*(Note: All PQC operations are executed via the `liboqs` C-backend, natively leveraging AVX2 hardware acceleration for optimal performance).*
+*(Note: All PQC operations are executed via the `liboqs` C-backend, which can leverage AVX2 hardware acceleration where available on the host CPU).*
 
 ---
 
