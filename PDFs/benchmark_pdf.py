@@ -22,28 +22,7 @@ WARMUP_ITERATIONS = 10
 
 
 def _zeroize(data: bytes) -> None:
-    """
-    Change 2 (Memory Key Erasure): best-effort in-place zeroization of a
-    Python bytes/bytearray object's backing buffer using ctypes.memset.
-
-    IMPORTANT CAVEATS (state these honestly in the manuscript, do not
-    oversell this as a formal security guarantee):
-      - Plain `bytes` objects are immutable in CPython. This function reaches
-        past that immutability by computing the address of the object's
-        inline data buffer (`id(data) + bytes.__basicsize__ - 1`) and
-        overwriting it directly. This is a CPython implementation detail,
-        not part of the Python language spec, and will not work on other
-        interpreters (e.g. PyPy).
-      - It cannot reach copies the interpreter or OS may already have made
-        (e.g. during string interning, bytecode constant folding, garbage
-        collection, or paging to swap).
-      - This is a defense-in-depth measure appropriate for a research
-        prototype/benchmark harness. A production system would use a
-        proper secure-memory primitive (e.g. mlock + explicit_bzero in a
-        native/C extension, or HSM/TPM-backed key storage) — which is
-        exactly the gap already acknowledged in the trust-assumptions
-        section (no TPM/HSM integration).
-    """
+    
     if not isinstance(data, (bytes, bytearray)):
         return
     size = len(data)
@@ -106,8 +85,6 @@ class CryptoBenchmark:
             "min_ms": min(times),
             "max_ms": max(times),
             "n": n,
-            # 95% CI margin of error: 1.96 * SD / sqrt(n) (normal approximation,
-            # valid here since n is always large e.g. 3000 per the manuscript).
             "ci95_ms": (1.96 * std / math.sqrt(n)) if n > 1 else 0.0,
         }
 
@@ -541,9 +518,6 @@ class CryptoBenchmark:
 
             keygen_times.append((time.perf_counter() - start) * 1000)
 
-            # Objects bound to this iteration's secret keys. Construction is kept
-            # OUTSIDE every timed region below — only the cryptographic operation
-            # itself is measured (direct instrumentation, per Reviewer #2).
             kem_enc = oqs.KeyEncapsulation(kem_algorithm, kem_sk)
             dil_signer = oqs.Signature(sig_algorithm, dil_sk)
 
@@ -683,10 +657,6 @@ class CryptoBenchmark:
         kem_decap_stats = self._summarize(kem_decap_times)
         decrypt_stats = self._summarize(decrypt_times)
 
-        # Protection / Recovery phase totals are the per-iteration SUM of the
-        # directly measured sub-operations above — NOT a separately wrapped
-        # outer timer, and NOT derived by subtraction. This is what Reviewer
-        # #2's comment on the cost breakdown is asking for.
         protect_times = [
             e + k + w + s
             for e, k, w, s in zip(encrypt_times, kem_encap_times, keywrap_times, sign_times)
@@ -845,7 +815,7 @@ class CryptoBenchmark:
                 print(f"  WARNING: {h['verification_failures']} / {h['iterations']} iterations failed dual-signature verification.")
 
             print("\n\nNEW Table 5b: Directly Measured Micro-Benchmark Breakdown of Proposed Hybrid Vault")
-            print("(Per instructions: insert this directly below Table 5 in the manuscript)")
+            print("Table 5b: Directly Measured Micro-Benchmark Breakdown of Proposed Hybrid Vault")
             print("-" * 90)
             print(f"{'Phase':<12} {'Sub-Operation Component':<48} {'Mean (ms)':>12} {'SD (ms)':>12}")
             print("-" * 90)
