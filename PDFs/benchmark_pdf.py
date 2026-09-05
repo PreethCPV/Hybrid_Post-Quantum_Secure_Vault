@@ -408,7 +408,6 @@ class CryptoBenchmark:
             dil_pub = dil_obj.generate_keypair()
             dil_sk_wu = dil_obj.export_secret_key()
 
-            # Algorithm 1, step 9: Vault <- AES-256-GCM.Encrypt(K_Master, KeysPlain)
             keystore_plain_wu = json.dumps({
                 "ecdsa_sk": base64.b64encode(ecdsa_priv_bytes_wu).decode(),
                 "dil_sk": base64.b64encode(dil_sk_wu).decode(),
@@ -427,7 +426,6 @@ class CryptoBenchmark:
             ct = enc.update(message) + enc.finalize()
             kem_ct, kem_shared = kem_obj.encap_secret(kem_pub)
             ecdh_shared = ecdh_priv.exchange(ec.ECDH(), ecdh_pub)
-            # Algorithm 2, line 6: KEK <- HKDF-SHA256(ss_PQ || ss_Class) — single combiner call
             kek = HKDF(
                 algorithm=hashes.SHA256(), length=32, salt=None,
                 info=b"key-encryption-key", backend=default_backend()
@@ -448,7 +446,7 @@ class CryptoBenchmark:
             ecdsa_priv.sign(sig_payload, ec.ECDSA(hashes.SHA256()))
             dil_obj.sign(sig_payload)
 
-        # ---- Change 1: one perf_counter() list per DIRECTLY measured sub-operation ----
+        
         keygen_times = []
 
         encrypt_times = []      # Protection: Symmetric Payload Encryption (AES-256-GCM)
@@ -501,9 +499,6 @@ class CryptoBenchmark:
             dil_pub = dil_obj.generate_keypair()
             dil_sk = dil_obj.export_secret_key()
 
-            # Algorithm 1, step 9: Vault <- AES-256-GCM.Encrypt(K_Master, KeysPlain)
-            # This is the step that was previously missing: master_key was derived
-            # but never actually used to protect the keystore.
             keystore_plain = json.dumps({
                 "ecdsa_sk": base64.b64encode(ecdsa_priv_bytes).decode(),
                 "dil_sk": base64.b64encode(dil_sk).decode(),
@@ -537,7 +532,6 @@ class CryptoBenchmark:
             start = time.perf_counter()
             kem_ct, kem_shared = kem_enc.encap_secret(kem_pub)          # ss_PQ, ct_PQ
             ecdh_shared = ecdh_priv.exchange(ec.ECDH(), ecdh_pub)       # ss_Class
-            # Algorithm 2, line 6: KEK <- HKDF-SHA256(ss_PQ || ss_Class) — single combiner call
             kek = HKDF(
                 algorithm=hashes.SHA256(), length=32, salt=None,
                 info=b"key-encryption-key", backend=default_backend()
@@ -553,11 +547,6 @@ class CryptoBenchmark:
             wrap_tag = wrap_enc.tag
             keywrap_times.append((time.perf_counter() - start) * 1000)
 
-            # -- 4. Dual Signing (ECDSA + ML-DSA-65) --
-            # Dual-Signature Binding (Section 4.3.2, step 3 / Algorithm 2, line 9):
-            # payload now covers C_Doc, ct_PQ, and Key_Wrapped together, not just the
-            # document ciphertext — so neither the KEM ciphertext nor the wrapped key
-            # can be swapped without invalidating both signatures.
             sig_payload = json.dumps(
                 {
                     "ciphertext": base64.b64encode(ciphertext).decode(),
@@ -591,15 +580,8 @@ class CryptoBenchmark:
                 dil_ok = False
             verify_times.append((time.perf_counter() - start) * 1000)
 
-            # Algorithm 3, lines 6-7: if not (V1 and V2): Abort -- do not proceed
-            # to decapsulation/decryption on a failed hybrid verification.
             if not (ecdsa_ok and dil_ok):
                 verification_failures += 1
-                # Keep sub-op lists aligned by iteration index: this iteration
-                # performed no decap/decrypt work, so record 0.0 rather than
-                # skipping the append (skipping would desynchronize
-                # kem_decap_times/decrypt_times from verify_times in the zip()
-                # below used to build recovery_times).
                 kem_decap_times.append(0.0)
                 decrypt_times.append(0.0)
             else:
@@ -637,9 +619,6 @@ class CryptoBenchmark:
                     "dil_sig": dil_sig,
                 }
 
-            # ================= Change 2: Memory Key Erasure =================
-            # Best-effort zeroization of this iteration's sensitive key material
-            # at the end of the iteration, once it is no longer needed.
             _zeroize(kem_sk)
             _zeroize(dil_sk)
             _zeroize(master_key)
@@ -686,7 +665,6 @@ class CryptoBenchmark:
             "quantum_safe": True,
             "iterations": iterations,
             "verification_failures": verification_failures,
-            # Change 1: directly measured sub-operation breakdown (NEW Table 5b)
             "protect_breakdown": {
                 "encrypt": encrypt_stats,
                 "kem_encap": kem_encap_stats,
@@ -881,7 +859,6 @@ class CryptoBenchmark:
                     "iterations": r["iterations"],
                     "verification_failures": r.get("verification_failures", 0),
                 }
-                # NEW Table 5b — directly measured sub-operation breakdown
                 for comp_name, comp_stats in {**pb, **rb}.items():
                     row[f"{comp_name}_mean_ms"] = comp_stats["mean_ms"]
                     row[f"{comp_name}_std_ms"] = comp_stats["std_ms"]
