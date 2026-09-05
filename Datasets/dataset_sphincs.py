@@ -9,6 +9,9 @@ from typing import Tuple, Dict, Any, List
 import time
 
 
+WARMUP_ITERATIONS = 10
+
+
 class RealSphincs:
 
     def __init__(self, security_level: int = 3):
@@ -185,6 +188,16 @@ class LegalDatasetSecuritySystem:
         with open(public_key_file, "wb") as f:
             f.write(public_key)
         print(f"Public key saved: {public_key_file}")
+
+        # Warm-up (discarded): clears Python/liboqs cold-start cost (first-call
+        # JIT/library-load overhead) before real timing begins, so document #1
+        # of the real dataset isn't unfairly slower than the rest. Matches the
+        # WARMUP_ITERATIONS convention used in the PDF micro-benchmark script.
+        # Uses placeholder content; results are fully discarded.
+        print(f"Running {WARMUP_ITERATIONS} warm-up iterations (discarded)...")
+        for _ in range(WARMUP_ITERATIONS):
+            warmup_sig = self.sphincs.sign_document("warmup placeholder document content")
+            self.sphincs.verify_signature("warmup placeholder document content", warmup_sig, public_key)
 
         signed_documents_list = []
         signing_times = []

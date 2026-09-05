@@ -9,10 +9,28 @@ import hashlib
 import json
 import os
 import base64
+import ctypes
 import statistics
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import time
+
+
+def _zeroize(data: bytes) -> None:
+    
+    if not isinstance(data, (bytes, bytearray)):
+        return
+    size = len(data)
+    if size == 0:
+        return
+    if isinstance(data, bytearray):
+        ctypes.memset((ctypes.c_char * size).from_buffer(data), 0, size)
+    else:
+        address = id(data) + bytes.__basicsize__ - 1
+        ctypes.memset(address, 0, size)
+
+
+WARMUP_ITERATIONS = 10
 
 
 class HybridVaultEngine:
@@ -31,6 +49,9 @@ class HybridVaultEngine:
         self.dil_public = None
         self.dil_sk = None
         self.master_key = None
+        self.keystore_vault = None
+        self.keystore_tag = None
+        self.keystore_iv = None
 
         print(f"Hybrid Vault Engine initialized")
         print(f"  KEM         : {self.kem_algorithm}")
@@ -63,6 +84,31 @@ class HybridVaultEngine:
         self.dil_public = dil_obj.generate_keypair()
         self.dil_sk = dil_obj.export_secret_key()
 
+        ecdh_private_pem = self.ecdh_private.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        ecdsa_private_pem = self.ecdsa_private.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        keystore_plain = json.dumps({
+            "ecdsa_sk": base64.b64encode(ecdsa_private_pem).decode(),
+            "dil_sk": base64.b64encode(self.dil_sk).decode(),
+            "ecdh_sk": base64.b64encode(ecdh_private_pem).decode(),
+            "kem_sk": base64.b64encode(self.kem_sk).decode(),
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        keystore_iv = os.urandom(12)
+        keystore_cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(keystore_iv), backend=default_backend())
+        keystore_encryptor = keystore_cipher.encryptor()
+        self.keystore_vault = keystore_encryptor.update(keystore_plain) + keystore_encryptor.finalize()
+        self.keystore_tag = keystore_encryptor.tag
+        self.keystore_iv = keystore_iv
+        _zeroize(keystore_plain)
+        del keystore_plain
+
         ecdsa_public_pem = self.ecdsa_public.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -80,57 +126,85 @@ class HybridVaultEngine:
             "salt": salt
         }
 
+    def zeroize_session_keys(self) -> None:
+        
+        _zeroize(self.kem_sk)
+        _zeroize(self.dil_sk)
+        _zeroize(self.master_key)
+        self.kem_sk = None
+        self.dil_sk = None
+        self.master_key = None
+
     def protect_document(self, document_content: str, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         if not self.ecdsa_private:
             self.generate_keypair()
 
         message_bytes = document_content.encode("utf-8")
+        timings = {}
 
+        # -- 1. Symmetric Payload Encryption (AES-256-GCM) --
+        t0 = time.perf_counter()
         aes_key = os.urandom(32)
         iv = os.urandom(12)
         cipher = Cipher(algorithms.AES(aes_key), modes.GCM(iv), backend=default_backend())
         encryptor = cipher.encryptor()
         ciphertext = encryptor.update(message_bytes) + encryptor.finalize()
         tag = encryptor.tag
+        timings["encrypt_ms"] = (time.perf_counter() - t0) * 1000
 
+        # -- 2. Hybrid KEM Encapsulation (ML-KEM + ECDH + HKDF) --
         kem_enc = oqs.KeyEncapsulation(self.kem_algorithm, self.kem_sk)
-        kem_ct, kem_shared = kem_enc.encap_secret(self.kem_public)
-
-        ecdh_shared = self.ecdh_private.exchange(ec.ECDH(), self.ecdh_public)
-        ecdh_derived = HKDF(
-            algorithm=hashes.SHA256(), length=32, salt=None,
-            info=b"hybrid-kem", backend=default_backend()
-        ).derive(ecdh_shared)
-
+        t0 = time.perf_counter()
+        kem_ct, kem_shared = kem_enc.encap_secret(self.kem_public)         # ss_PQ, ct_PQ
+        ecdh_shared = self.ecdh_private.exchange(ec.ECDH(), self.ecdh_public)  # ss_Class
+        # Algorithm 2, line 6: KEK <- HKDF-SHA256(ss_PQ || ss_Class) — single combiner call
         kek = HKDF(
             algorithm=hashes.SHA256(), length=32, salt=None,
             info=b"key-encryption-key", backend=default_backend()
-        ).derive(kem_shared + ecdh_derived)
+        ).derive(kem_shared + ecdh_shared)
+        timings["kem_encap_ms"] = (time.perf_counter() - t0) * 1000
 
+        # -- 3. Key Wrapping (AES-256-GCM Key Wrapper) --
+        t0 = time.perf_counter()
         wrap_iv = os.urandom(12)
         wrap_cipher = Cipher(algorithms.AES(kek), modes.GCM(wrap_iv), backend=default_backend())
         wrap_enc = wrap_cipher.encryptor()
         wrapped_key = wrap_enc.update(aes_key) + wrap_enc.finalize()
         wrap_tag = wrap_enc.tag
+        timings["keywrap_ms"] = (time.perf_counter() - t0) * 1000
 
+        t0 = time.perf_counter()
         sig_payload = json.dumps(
             {
                 "ciphertext": base64.b64encode(ciphertext).decode(),
+                "kem_ciphertext": base64.b64encode(kem_ct).decode(),
+                "wrapped_key": base64.b64encode(wrapped_key).decode(),
                 "timestamp": datetime.now().isoformat(),
                 "metadata": metadata or {}
             },
             sort_keys=True,
             separators=(",", ":")
         ).encode("utf-8")
+        timings["canonicalize_ms"] = (time.perf_counter() - t0) * 1000
 
-        ecdsa_sig = self.ecdsa_private.sign(sig_payload, ec.ECDSA(hashes.SHA256()))
-
+        # -- 5. Dual Signing (ECDSA + ML-DSA-65) --
+        t0 = time.perf_counter()
         dil_signer = oqs.Signature(self.sig_algorithm, self.dil_sk)
+        ecdsa_sig = self.ecdsa_private.sign(sig_payload, ec.ECDSA(hashes.SHA256()))
         dil_sig = dil_signer.sign(sig_payload)
+        timings["sign_ms"] = (time.perf_counter() - t0) * 1000
 
+        # -- 6. Package Assembly & Metadata Hashing --
+        # Builds the on-disk package representation: re-encodes every field to
+        # base64 for JSON storage and computes the document's SHA3-256 hash
+        # used as a content identifier. This is a second, previously
+        # unmeasured gap distinct from step 4 above (step 4 canonicalizes only
+        # the SIGNED payload; this step serializes the full stored package
+        # afterward) — also now measured directly rather than silently folded
+        # into the outer protection_time wrapper.
+        t0 = time.perf_counter()
         doc_hash = hashlib.sha3_256(document_content.encode("utf-8")).hexdigest()
-
-        return {
+        package = {
             "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
             "iv": base64.b64encode(iv).decode("ascii"),
             "tag": base64.b64encode(tag).decode("ascii"),
@@ -142,89 +216,126 @@ class HybridVaultEngine:
             "dil_sig": base64.b64encode(dil_sig).decode("ascii"),
             "sig_payload": base64.b64encode(sig_payload).decode("ascii"),
             "document_hash": doc_hash,
+        }
+        timings["package_assembly_ms"] = (time.perf_counter() - t0) * 1000
+
+        return {
+            **package,
             "ecdsa_sig_bytes": len(ecdsa_sig),
             "dil_sig_bytes": len(dil_sig),
             "kem_ct_bytes": len(kem_ct),
             "wrapped_key_bytes": len(wrapped_key),
             "ciphertext_bytes": len(ciphertext),
             "total_overhead_bytes": len(kem_ct) + len(wrapped_key) + len(ecdsa_sig) + len(dil_sig),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "timings": timings,
         }
 
     def recover_document(self, protected_data: Dict[str, Any]) -> Dict[str, Any]:
         if not self.ecdsa_private:
-            return {"valid": False, "error": "Keys not initialized"}
+            return {"valid": False, "error": "Keys not initialized", "timings": {}}
 
+        timings = {}
         try:
+            t0 = time.perf_counter()
             sig_payload = base64.b64decode(protected_data["sig_payload"])
             ecdsa_sig = base64.b64decode(protected_data["ecdsa_sig"])
             dil_sig = base64.b64decode(protected_data["dil_sig"])
-
-            try:
-                self.ecdsa_public.verify(ecdsa_sig, sig_payload, ec.ECDSA(hashes.SHA256()))
-                ecdsa_valid = True
-            except Exception:
-                ecdsa_valid = False
-
-            dil_verifier = oqs.Signature(self.sig_algorithm)
-            dil_valid = dil_verifier.verify(sig_payload, dil_sig, self.dil_public)
-
-            kem_dec = oqs.KeyEncapsulation(self.kem_algorithm, self.kem_sk)
             kem_ct = base64.b64decode(protected_data["kem_ct"])
-            kem_shared_dec = kem_dec.decap_secret(kem_ct)
-
-            ecdh_shared_dec = self.ecdh_private.exchange(ec.ECDH(), self.ecdh_public)
-            ecdh_derived_dec = HKDF(
-                algorithm=hashes.SHA256(), length=32, salt=None,
-                info=b"hybrid-kem", backend=default_backend()
-            ).derive(ecdh_shared_dec)
-
-            kek_dec = HKDF(
-                algorithm=hashes.SHA256(), length=32, salt=None,
-                info=b"key-encryption-key", backend=default_backend()
-            ).derive(kem_shared_dec + ecdh_derived_dec)
-
             wrapped_key = base64.b64decode(protected_data["wrapped_key"])
             wrap_iv = base64.b64decode(protected_data["wrap_iv"])
             wrap_tag = base64.b64decode(protected_data["wrap_tag"])
+            ciphertext = base64.b64decode(protected_data["ciphertext"])
+            iv = base64.b64decode(protected_data["iv"])
+            auth_tag = base64.b64decode(protected_data["tag"])
+            timings["decode_ms"] = (time.perf_counter() - t0) * 1000
 
+            # -- 1. Dual Signature Verification (ECDSA + ML-DSA-65, strict AND) --
+            dil_verifier = oqs.Signature(self.sig_algorithm)
+            t0 = time.perf_counter()
+            ecdsa_valid = True
+            try:
+                self.ecdsa_public.verify(ecdsa_sig, sig_payload, ec.ECDSA(hashes.SHA256()))
+            except Exception:
+                ecdsa_valid = False
+            dil_valid = True
+            try:
+                dil_verifier.verify(sig_payload, dil_sig, self.dil_public)
+            except Exception:
+                dil_valid = False
+            timings["verify_ms"] = (time.perf_counter() - t0) * 1000
+
+            if not (ecdsa_valid and dil_valid):
+                return {
+                    "valid": False,
+                    "ecdsa_valid": ecdsa_valid,
+                    "dil_valid": dil_valid,
+                    "error": "Dual-signature verification failed (strict AND policy) — aborted before decapsulation",
+                    "timings": timings,
+                }
+
+            # -- 2. Hybrid KEM Decapsulation & Key Unwrapping --
+            kem_dec = oqs.KeyEncapsulation(self.kem_algorithm, self.kem_sk)
+            t0 = time.perf_counter()
+            kem_shared_dec = kem_dec.decap_secret(kem_ct)
+            ecdh_shared_dec = self.ecdh_private.exchange(ec.ECDH(), self.ecdh_public)
+            # Algorithm 2, line 6 combiner used in reverse: HKDF-SHA256(ss_PQ || ss_Class)
+            kek_dec = HKDF(
+                algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"key-encryption-key", backend=default_backend()
+            ).derive(kem_shared_dec + ecdh_shared_dec)
             unwrap_cipher = Cipher(
                 algorithms.AES(kek_dec), modes.GCM(wrap_iv, wrap_tag),
                 backend=default_backend()
             )
             unwrap_dec = unwrap_cipher.decryptor()
             aes_key_dec = unwrap_dec.update(wrapped_key) + unwrap_dec.finalize()
+            timings["kem_decap_ms"] = (time.perf_counter() - t0) * 1000
 
-            ciphertext = base64.b64decode(protected_data["ciphertext"])
-            iv = base64.b64decode(protected_data["iv"])
-            auth_tag = base64.b64decode(protected_data["tag"])
-
+            # -- 3. Symmetric Payload Decryption (AES-256-GCM) --
+            t0 = time.perf_counter()
             dec_cipher = Cipher(
                 algorithms.AES(aes_key_dec), modes.GCM(iv, auth_tag),
                 backend=default_backend()
             )
             decryptor = dec_cipher.decryptor()
             plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            timings["decrypt_ms"] = (time.perf_counter() - t0) * 1000
 
             return {
-                "valid": ecdsa_valid and dil_valid,
+                "valid": True,
                 "ecdsa_valid": ecdsa_valid,
                 "dil_valid": dil_valid,
-                "decrypted_content": plaintext.decode("utf-8")
+                "decrypted_content": plaintext.decode("utf-8"),
+                "timings": timings,
             }
 
         except Exception as e:
-            return {"valid": False, "error": str(e)}
+            return {"valid": False, "error": str(e), "timings": timings}
+
+
+def _summarize_times(times: List[float]) -> Dict[str, float]:
+    if not times:
+        return {"mean_ms": 0.0, "std_ms": 0.0, "n": 0}
+    return {
+        "mean_ms": statistics.mean(times),
+        "std_ms": statistics.stdev(times) if len(times) > 1 else 0.0,
+        "n": len(times),
+    }
 
 
 class HybridDatasetSecuritySystem:
+
+
+
 
     def __init__(self, dataset_path: str):
         self.dataset_path = dataset_path
         self.engine = HybridVaultEngine()
         self.keys = {}
-
-        self.output_base = "secured_dataset_hybrid_vault"
+        
+        dataset_name = os.path.basename(os.path.normpath(dataset_path))
+        self.output_base = f"secured_dataset_hybrid_vault_{dataset_name}"
         self.packages_dir = os.path.join(self.output_base, "packages")
         self.reports_dir = os.path.join(self.output_base, "reports")
 
@@ -292,9 +403,23 @@ class HybridDatasetSecuritySystem:
         self.keys = self.engine.generate_keypair()
         print("All keys generated successfully")
 
+        # Warm-up (discarded): clears Python/liboqs cold-start cost (first-call
+        # JIT/library-load overhead for AES/HKDF/ML-KEM/ML-DSA) before real
+        # timing begins, so document #1 of the real dataset isn't unfairly
+        # slower than the rest. Matches the WARMUP_ITERATIONS convention used
+        # in the PDF micro-benchmark script. Uses placeholder content; results
+        # (including their "timings" sub-op breakdown) are fully discarded.
+        print(f"Running {WARMUP_ITERATIONS} warm-up iterations (discarded)...")
+        for _ in range(WARMUP_ITERATIONS):
+            warmup_protected = self.engine.protect_document("warmup placeholder document content")
+            self.engine.recover_document(warmup_protected)
+
         protected_list = []
         protection_times = []
         total_overhead = 0
+
+        encrypt_times, kem_encap_times, keywrap_times = [], [], []
+        canonicalize_times, sign_times, package_assembly_times = [], [], []
 
         start_time = time.perf_counter()
 
@@ -314,6 +439,15 @@ class HybridDatasetSecuritySystem:
 
                 protection_times.append(protection_time)
                 total_overhead += protected_data["total_overhead_bytes"]
+
+                t = protected_data.get("timings", {})
+                if t:
+                    encrypt_times.append(t["encrypt_ms"])
+                    kem_encap_times.append(t["kem_encap_ms"])
+                    keywrap_times.append(t["keywrap_ms"])
+                    canonicalize_times.append(t["canonicalize_ms"])
+                    sign_times.append(t["sign_ms"])
+                    package_assembly_times.append(t["package_assembly_ms"])
 
                 protected_doc = {
                     "document_id": doc["id"],
@@ -343,6 +477,15 @@ class HybridDatasetSecuritySystem:
         total_time = time.perf_counter() - start_time
         protected_count = len(protected_list)
 
+        protect_breakdown = {
+            "encrypt": _summarize_times(encrypt_times),
+            "kem_encap": _summarize_times(kem_encap_times),
+            "keywrap": _summarize_times(keywrap_times),
+            "canonicalize": _summarize_times(canonicalize_times),
+            "sign": _summarize_times(sign_times),
+            "package_assembly": _summarize_times(package_assembly_times),
+        }
+
         print("\nPROTECTION COMPLETED")
         print("=" * 70)
         print(f"  Documents protected : {protected_count}/{len(documents)}")
@@ -352,6 +495,13 @@ class HybridDatasetSecuritySystem:
             print(f"  SD time/doc         : {statistics.stdev(protection_times):.4f} ms")
             print(f"  Throughput          : {protected_count / total_time:.2f} docs/s")
             print(f"  Avg overhead/doc    : {total_overhead // protected_count:,} bytes")
+            print("\n  Sub-operation breakdown (mean ms/doc, directly measured):")
+            print(f"    Symmetric Payload Encryption (AES-256-GCM)      : {protect_breakdown['encrypt']['mean_ms']:.4f} ms (SD {protect_breakdown['encrypt']['std_ms']:.4f})")
+            print(f"    Hybrid KEM Encapsulation (ML-KEM+ECDH+HKDF)     : {protect_breakdown['kem_encap']['mean_ms']:.4f} ms (SD {protect_breakdown['kem_encap']['std_ms']:.4f})")
+            print(f"    Key Wrapping (AES-256-GCM Key Wrapper)          : {protect_breakdown['keywrap']['mean_ms']:.4f} ms (SD {protect_breakdown['keywrap']['std_ms']:.4f})")
+            print(f"    Payload Canonicalization (JSON + Base64)        : {protect_breakdown['canonicalize']['mean_ms']:.4f} ms (SD {protect_breakdown['canonicalize']['std_ms']:.4f})")
+            print(f"    Dual Signing (ECDSA + ML-DSA-65)                : {protect_breakdown['sign']['mean_ms']:.4f} ms (SD {protect_breakdown['sign']['std_ms']:.4f})")
+            print(f"    Package Assembly & Metadata Hashing             : {protect_breakdown['package_assembly']['mean_ms']:.4f} ms (SD {protect_breakdown['package_assembly']['std_ms']:.4f})")
         print("=" * 70)
 
         return {
@@ -366,7 +516,8 @@ class HybridDatasetSecuritySystem:
             "total_overhead_bytes": total_overhead,
             "avg_overhead_bytes": total_overhead // protected_count if protected_count else 0,
             "packages_directory": self.packages_dir,
-            "protected_list": protected_list
+            "protected_list": protected_list,
+            "protect_breakdown": protect_breakdown,
         }
 
     def recover_all_documents(self, documents: List[Dict[str, Any]],
@@ -379,6 +530,8 @@ class HybridDatasetSecuritySystem:
         valid_count = 0
         invalid_count = 0
 
+        decode_times, verify_times, kem_decap_times, decrypt_times = [], [], [], []
+
         start_time = time.perf_counter()
 
         for idx, protected_doc in enumerate(protect_summary["protected_list"], 1):
@@ -388,6 +541,16 @@ class HybridDatasetSecuritySystem:
                 recovery_time = (time.perf_counter() - recover_start) * 1000
 
                 recovery_times.append(recovery_time)
+
+                t = result.get("timings", {})
+                if "decode_ms" in t:
+                    decode_times.append(t["decode_ms"])
+                if "verify_ms" in t:
+                    verify_times.append(t["verify_ms"])
+                if "kem_decap_ms" in t:
+                    kem_decap_times.append(t["kem_decap_ms"])
+                if "decrypt_ms" in t:
+                    decrypt_times.append(t["decrypt_ms"])
 
                 recovery_results.append({
                     "document_id": protected_doc["document_id"],
@@ -417,6 +580,13 @@ class HybridDatasetSecuritySystem:
         total_recovered = len(recovery_results)
         success_rate = (valid_count / total_recovered * 100) if total_recovered > 0 else 0
 
+        recovery_breakdown = {
+            "decode": _summarize_times(decode_times),
+            "verify": _summarize_times(verify_times),
+            "kem_decap": _summarize_times(kem_decap_times),
+            "decrypt": _summarize_times(decrypt_times),
+        }
+
         print("\nRECOVERY COMPLETED")
         print("=" * 70)
         print(f"  Documents recovered : {total_recovered}")
@@ -428,6 +598,11 @@ class HybridDatasetSecuritySystem:
             print(f"  Mean time/doc       : {statistics.mean(recovery_times):.4f} ms")
             print(f"  SD time/doc         : {statistics.stdev(recovery_times):.4f} ms")
             print(f"  Throughput          : {total_recovered / total_time:.2f} docs/s")
+            print("\n  Sub-operation breakdown (mean ms/doc, directly measured):")
+            print(f"    Package Unpacking (Base64 Decoding)             : {recovery_breakdown['decode']['mean_ms']:.4f} ms (SD {recovery_breakdown['decode']['std_ms']:.4f})")
+            print(f"    Dual Signature Verification (ECDSA + ML-DSA-65) : {recovery_breakdown['verify']['mean_ms']:.4f} ms (SD {recovery_breakdown['verify']['std_ms']:.4f})")
+            print(f"    Hybrid KEM Decapsulation & Key Unwrapping       : {recovery_breakdown['kem_decap']['mean_ms']:.4f} ms (SD {recovery_breakdown['kem_decap']['std_ms']:.4f})")
+            print(f"    Symmetric Payload Decryption (AES-256-GCM)      : {recovery_breakdown['decrypt']['mean_ms']:.4f} ms (SD {recovery_breakdown['decrypt']['std_ms']:.4f})")
         print("=" * 70)
 
         return {
@@ -440,7 +615,8 @@ class HybridDatasetSecuritySystem:
             "avg_recovery_time_ms": statistics.mean(recovery_times) if recovery_times else 0,
             "std_recovery_time_ms": statistics.stdev(recovery_times) if len(recovery_times) > 1 else 0,
             "throughput_docs_per_sec": total_recovered / total_time if total_time > 0 else 0,
-            "recovery_results": recovery_results
+            "recovery_results": recovery_results,
+            "recovery_breakdown": recovery_breakdown,
         }
 
     def compute_output_size(self, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -521,6 +697,10 @@ class HybridDatasetSecuritySystem:
                 "avg_recovery_time_ms": recovery_summary["avg_recovery_time_ms"],
                 "std_recovery_time_ms": recovery_summary["std_recovery_time_ms"],
                 "throughput_docs_per_sec": recovery_summary["throughput_docs_per_sec"]
+            },
+            "operation_breakdown": {
+                "protection_phase": protect_summary.get("protect_breakdown", {}),
+                "recovery_phase": recovery_summary.get("recovery_breakdown", {}),
             },
             "storage_metrics": {
                 "original_dataset_bytes": size_metrics["original_dataset_bytes"],
@@ -611,6 +791,9 @@ def main():
     print("=" * 70)
     recovery_summary = system.recover_all_documents(documents, protect_summary)
     print(f"Step 3 complete: {recovery_summary['valid_count']}/{recovery_summary['total_recovered']} valid")
+
+    system.engine.zeroize_session_keys()
+    print("Session key material (kem_sk, dil_sk, master_key) zeroized.")
 
     print("\n" + "=" * 70)
     print("STEP 4: GENERATING REPORT")
